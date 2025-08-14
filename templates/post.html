@@ -2,8 +2,24 @@
 
 {% block content %}
     <h2>{% block title %} {{ post['title'] }} {% endblock %}</h2>
-    <span class="badge badge-primary">{{ post['created'] }}</span>
-    <p>{{ post['content'] }}</p>
+      {% if user %}
+        <form method="post" action="{{ url_for('toggle_favorite', post_id=post['id']) }}" style="display:inline;">
+          <button type="submit" style="background:none;border:none;padding:0;cursor:pointer;">
+            {% if is_favorite %}
+              <span title="Remove from favorites" style="color:gold;font-size:1.5em;">&#9733;</span>
+            {% else %}
+              <span title="Add to favorites" style="color:gray;font-size:1.5em;">&#9734;</span>
+            {% endif %}
+          </button>
+        </form>
+      {% endif %}
+  <span class="badge badge-primary">{{ post['created'] }}</span>
+  <div style="white-space: pre-wrap;">{{ post['content'] }}</div>
+    {% if user %}
+      <p>
+        <a class="btn btn-sm btn-outline-danger" href="{{ url_for('report_post', post_id=post['id']) }}">Report Post</a>
+      </p>
+    {% endif %}
     <hr>
     <h4>Comments</h4>
     <div class="mb-4">
@@ -13,8 +29,18 @@
             <div class="card-body">
               <p class="card-text">{{ comment['content'] }}</p>
               <footer class="blockquote-footer">
-                {{ comment['username'] or 'Anonymous' }} on {{ comment['created'] }}
+                {% if comment['username'] %}
+                  <a href="{{ url_for('public_profile', username=comment['username']) }}">{{ comment['username'] }}</a>
+                {% else %}
+                  Anonymous
+                {% endif %}
+                on {{ comment['created'] }}
               </footer>
+              {% if user %}
+                <div class="mt-2">
+                  <a class="btn btn-sm btn-outline-danger" href="{{ url_for('report_comment', comment_id=comment['id']) }}">Report Comment</a>
+                </div>
+              {% endif %}
             </div>
           </div>
         {% endfor %}

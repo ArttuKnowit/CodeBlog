@@ -1,0 +1,7 @@
+Introduction to SQL Joins
+
+SQL joins combine rows from multiple tables based on related columns. This post introduces common join types and when to use them.
+
+The core types are INNER JOIN and LEFT JOIN. INNER JOIN returns only matching rows. LEFT JOIN returns all rows from the left table plus matches from the right table (NULLs when there’s no match).
+
+RIGHT JOIN and FULL OUTER JOIN are less common but useful in some databases. RIGHT JOIN mirrors LEFT JOIN from the other side, while FULL OUTER JOIN returns all rows from both tables with NULLs where there’s no match.

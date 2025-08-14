@@ -40,9 +40,46 @@ def get_comments(post_id):
     conn.close()
     return [dict(c) for c in comments]
 
+# Fetch a single comment by id
+def get_comment_by_id(comment_id):
+    conn = get_db_connection()
+    comment = conn.execute('SELECT * FROM comments WHERE id = ?', (comment_id,)).fetchone()
+    conn.close()
+    if comment is None:
+        abort(404)
+    return comment
+
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your secret key'
+
+# Create optional tables if missing (e.g., reports)
+def ensure_optional_tables():
+    conn = get_db_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reporter_user_id INTEGER NOT NULL,
+            target_type TEXT NOT NULL CHECK(target_type IN ('post','comment')),
+            target_id INTEGER NOT NULL,
+            reason TEXT NOT NULL,
+            created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (reporter_user_id) REFERENCES users (id)
+        )
+        """
+    )
+    # Ensure users.intro column exists for older databases
+    try:
+        has_intro = conn.execute("SELECT 1 FROM pragma_table_info('users') WHERE name='intro'").fetchone()
+        if not has_intro:
+            conn.execute("ALTER TABLE users ADD COLUMN intro TEXT DEFAULT ''")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+ensure_optional_tables()
 
 # Flask-Login setup
 login_manager = LoginManager()
@@ -82,7 +119,7 @@ def load_user(user_id):
 @app.route('/')
 def index():
     conn = get_db_connection()
-    posts = conn.execute('SELECT * FROM posts').fetchall()
+    posts = conn.execute('SELECT * FROM posts ORDER BY created DESC').fetchall()
     conn.close()
     return render_template('index.html', posts=[dict(p) for p in posts], user=current_user if current_user.is_authenticated else None)
 
@@ -91,7 +128,35 @@ def index():
 def post(post_id):
     post = get_post(post_id)
     comments = get_comments(post_id)
-    return render_template('post.html', post=post, comments=comments, user=current_user if current_user.is_authenticated else None)
+    # Determine favorite state for the current user
+    is_favorite = False
+    if current_user.is_authenticated:
+        conn = get_db_connection()
+        fav = conn.execute('SELECT 1 FROM favorites WHERE user_id = ? AND post_id = ?',
+                           (current_user.id, post_id)).fetchone()
+        conn.close()
+        is_favorite = fav is not None
+    return render_template('post.html', post=post, comments=comments, is_favorite=is_favorite,
+                           user=current_user if current_user.is_authenticated else None)
+
+@app.route('/<int:post_id>/favorite', methods=['POST'])
+@login_required
+def toggle_favorite(post_id):
+    # Toggle favorite for the logged-in user and the given post
+    conn = get_db_connection()
+    existing = conn.execute('SELECT 1 FROM favorites WHERE user_id = ? AND post_id = ?',
+                            (current_user.id, post_id)).fetchone()
+    if existing:
+        conn.execute('DELETE FROM favorites WHERE user_id = ? AND post_id = ?',
+                     (current_user.id, post_id))
+        flash('Removed from favorites.', 'info')
+    else:
+        conn.execute('INSERT INTO favorites (user_id, post_id) VALUES (?, ?)',
+                     (current_user.id, post_id))
+        flash('Added to favorites.', 'info')
+    conn.commit()
+    conn.close()
+    return redirect(url_for('post', post_id=post_id))
 @app.route('/<int:post_id>/comment', methods=['POST'])
 @login_required
 def add_comment(post_id):
@@ -99,7 +164,7 @@ def add_comment(post_id):
     # BUG 2: 500 error on special character in comment
     import re
     if not content:
-        flash('Comment cannot be empty!')
+        flash('Comment cannot be empty!', 'error')
     elif re.search(r'[^a-zA-Z0-9\s]', content):
         raise Exception('Special characters not allowed!')
     else:
@@ -108,25 +173,76 @@ def add_comment(post_id):
                      (post_id, current_user.id, content))
         conn.commit()
         conn.close()
-        flash('Comment added!')
+        flash('Comment added!', 'info')
     return redirect(url_for('post', post_id=post_id))
+
+
+# Report a post
+@app.route('/report/post/<int:post_id>', methods=['GET', 'POST'])
+@login_required
+def report_post(post_id):
+    post = get_post(post_id)
+    if request.method == 'POST':
+        reason = request.form.get('reason', '').strip()
+        if not reason:
+            flash('Reason is required to submit a report.', 'error')
+        elif (post['user_id'] is not None) and int(post['user_id']) == int(current_user.id):
+            flash('You cannot report your own post.', 'error')
+        else:
+            conn = get_db_connection()
+            conn.execute(
+                'INSERT INTO reports (reporter_user_id, target_type, target_id, reason) VALUES (?, ?, ?, ?)',
+                (current_user.id, 'post', post_id, reason)
+            )
+            conn.commit()
+            conn.close()
+            flash('Report submitted. Thank you.', 'info')
+            return redirect(url_for('post', post_id=post_id))
+    return render_template('report.html', user=current_user if current_user.is_authenticated else None,
+                           target_type='post', post=dict(post))
+
+
+# Report a comment
+@app.route('/report/comment/<int:comment_id>', methods=['GET', 'POST'])
+@login_required
+def report_comment(comment_id):
+    comment = get_comment_by_id(comment_id)
+    if request.method == 'POST':
+        reason = request.form.get('reason', '').strip()
+        if not reason:
+            flash('Reason is required to submit a report.', 'error')
+        elif (comment['user_id'] is not None) and int(comment['user_id']) == int(current_user.id):
+            flash('You cannot report your own comment.', 'error')
+        else:
+            conn = get_db_connection()
+            conn.execute(
+                'INSERT INTO reports (reporter_user_id, target_type, target_id, reason) VALUES (?, ?, ?, ?)',
+                (current_user.id, 'comment', comment_id, reason)
+            )
+            conn.commit()
+            conn.close()
+            flash('Report submitted. Thank you.', 'info')
+            return redirect(url_for('post', post_id=comment['post_id']))
+    return render_template('report.html', user=current_user if current_user.is_authenticated else None,
+                           target_type='comment', comment=dict(comment))
 
 
 @app.route('/create', methods=('GET', 'POST'))
 def create():
     if not current_user.is_authenticated:
-        flash('You must be logged in to create a post.')
+        flash('You must be logged in to create a post.', 'error')
         return redirect(url_for('login'))
     if request.method == 'POST':
         title = request.form['title']
         content = request.form['content']
 
         if not title:
-            flash('Title is required!')
+            flash('Title is required!', 'error')
         else:
             conn = get_db_connection()
-            conn.execute('INSERT INTO posts (title, content) VALUES (?, ?)',
-                         (title, content))
+            # Associate post with the logged-in user
+            conn.execute('INSERT INTO posts (title, content, user_id) VALUES (?, ?, ?)',
+                         (title, content, current_user.id))
             conn.commit()
             conn.close()
             return redirect(url_for('index'))
@@ -139,23 +255,16 @@ def register():
         password = request.form['password']
         # BUG 1: Allow empty password
         if not username:
-            flash('Username is required!')
+            flash('Username is required!', 'error')
         elif User.get_by_username(username):
-            # BUG 3: Change password if username exists, no error
-            conn = get_db_connection()
-            conn.execute('UPDATE users SET password = ? WHERE username = ?',
-                         (generate_password_hash(password), username))
-            conn.commit()
-            conn.close()
-            flash('Password updated for existing user.')
-            return redirect(url_for('login'))
+            flash('Username already exists! Please choose a different username.', 'error')
         else:
             conn = get_db_connection()
             conn.execute('INSERT INTO users (username, password) VALUES (?, ?)',
                          (username, generate_password_hash(password)))
             conn.commit()
             conn.close()
-            flash('Registration successful! Please log in.')
+            flash('Registration successful! Please log in.', 'info')
             return redirect(url_for('login'))
     return render_template('register.html', user=current_user if current_user.is_authenticated else None)
 
@@ -168,24 +277,143 @@ def login():
         user = User.get_by_username(username)
         if user and check_password_hash(user.password, password):
             login_user(user)
-            flash('Logged in successfully!')
+            flash('Logged in successfully!', 'info')
             return redirect(url_for('index'))
         else:
-            flash('Invalid username or password!')
+            flash('Invalid username or password!', 'error')
     return render_template('login.html', user=current_user if current_user.is_authenticated else None)
 
 
 @app.route('/logout')
 def logout():
     logout_user()
-    flash('Logged out successfully!')
+    flash('Logged out successfully!', 'info')
     return redirect(url_for('index'))
+
+
+# Change password feature
+@app.route('/change_password', methods=['GET', 'POST'])
+@login_required
+def change_password():
+    error = None
+    message = None
+    if request.method == 'POST':
+        current_password = request.form['current_password']
+        new_password = request.form['new_password']
+        confirm_password = request.form['confirm_password']
+        user = User.get(current_user.id)
+        if not check_password_hash(user.password, current_password):
+            error = 'Current password is incorrect.'
+        elif new_password != confirm_password:
+            error = 'New passwords do not match.'
+        elif not new_password:
+            error = 'New password cannot be empty.'
+        else:
+            conn = get_db_connection()
+            conn.execute('UPDATE users SET password = ? WHERE id = ?',
+                         (generate_password_hash(new_password), current_user.id))
+            conn.commit()
+            conn.close()
+            message = 'Password changed successfully.'
+    return render_template('change_password.html', user=current_user, error=error, message=message)
+
+
+# User profile page showing the logged-in user's posts and comments
+@app.route('/profile')
+@login_required
+def profile():
+    conn = get_db_connection()
+    # User's own posts
+    subject_id = current_user.id
+    profile_row = get_user_by_id(subject_id)
+    user_posts = conn.execute(
+        'SELECT id, title, created FROM posts WHERE user_id = ? ORDER BY created DESC',
+        (subject_id,)
+    ).fetchall()
+    # User's comments with related post titles
+    user_comments = conn.execute(
+        'SELECT c.post_id, c.content, c.created, p.title AS post_title '
+        'FROM comments c JOIN posts p ON p.id = c.post_id '
+        'WHERE c.user_id = ? ORDER BY c.created DESC',
+    (subject_id,)
+    ).fetchall()
+    # Optional favorites if used
+    favorites = conn.execute(
+        'SELECT p.id, p.title FROM favorites f JOIN posts p ON p.id = f.post_id '
+        'WHERE f.user_id = ? ORDER BY p.created DESC',
+        (subject_id,)
+    ).fetchall()
+    conn.close()
+
+    return render_template(
+        'user_profile.html',
+    user=current_user,
+        profile_user={
+            'id': current_user.id,
+            'username': current_user.username,
+            'intro': (profile_row['intro'] if (profile_row is not None and ('intro' in profile_row.keys())) else '')
+        },
+        user_posts=[dict(p) for p in user_posts],
+        user_comments=[dict(c) for c in user_comments],
+        favorites=[dict(f) for f in favorites],
+    )
+
+
+# Public profile page for any username
+@app.route('/user/<username>')
+def public_profile(username):
+    target = get_user_by_username(username)
+    if not target:
+        abort(404)
+    subject_id = target['id']
+    conn = get_db_connection()
+    user_posts = conn.execute(
+        'SELECT id, title, created FROM posts WHERE user_id = ? ORDER BY created DESC',
+        (subject_id,)
+    ).fetchall()
+    user_comments = conn.execute(
+        'SELECT c.post_id, c.content, c.created, p.title AS post_title '
+        'FROM comments c JOIN posts p ON p.id = c.post_id '
+        'WHERE c.user_id = ? ORDER BY c.created DESC',
+        (subject_id,)
+    ).fetchall()
+    favorites = conn.execute(
+        'SELECT p.id, p.title FROM favorites f JOIN posts p ON p.id = f.post_id '
+        'WHERE f.user_id = ? ORDER BY p.created DESC',
+        (subject_id,)
+    ).fetchall()
+    conn.close()
+
+    return render_template(
+        'user_profile.html',
+        user=current_user if current_user.is_authenticated else None,
+    profile_user={'id': target['id'], 'username': target['username'], 'intro': (target['intro'] if ('intro' in target.keys()) else '')},
+        user_posts=[dict(p) for p in user_posts],
+        user_comments=[dict(c) for c in user_comments],
+        favorites=[dict(f) for f in favorites],
+    )
+
+
+# Edit current user's intro
+@app.route('/profile/intro', methods=['POST'])
+@login_required
+def update_intro():
+    intro = request.form.get('intro', '').strip()
+    if len(intro) > 2000:
+        flash('Introduction is too long (max 2000 characters).', 'error')
+        return redirect(url_for('profile'))
+    conn = get_db_connection()
+    conn.execute('UPDATE users SET intro = ? WHERE id = ?', (intro, current_user.id))
+    conn.commit()
+    conn.close()
+    flash('Introduction updated.', 'info')
+    return redirect(url_for('profile'))
 
 
 @app.route('/<int:id>/edit', methods=('GET', 'POST'))
 def edit(id):
     if not current_user.is_authenticated:
-        flash('You must be logged in to edit posts.')
+        flash('You must be logged in to edit posts.', 'error')
         return redirect(url_for('login'))
     post = get_post(id)
     if request.method == 'POST':
@@ -193,7 +421,7 @@ def edit(id):
         content = request.form['content']
 
         if not title:
-            flash('Title is required!')
+            flash('Title is required!', 'error')
         else:
             conn = get_db_connection()
             conn.execute('UPDATE posts SET title = ?, content = ?'
@@ -209,12 +437,12 @@ def edit(id):
 @app.route('/<int:id>/delete', methods=('POST',))
 def delete(id):
     if not current_user.is_authenticated:
-        flash('You must be logged in to delete posts.')
+        flash('You must be logged in to delete posts.', 'error')
         return redirect(url_for('login'))
     post = get_post(id)
     conn = get_db_connection()
     conn.execute('DELETE FROM posts WHERE id = ?', (id,))
     conn.commit()
     conn.close()
-    flash('"{}" was successfully deleted!'.format(post['title']))
+    flash('"{}" was successfully deleted!'.format(post['title']), 'info')
     return redirect(url_for('index'))

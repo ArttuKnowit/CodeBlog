@@ -1,0 +1,9 @@
+Getting Started with Flask
+
+Flask is a lightweight Python web framework. This post covers installing Flask, creating your first app, and adding a simple route.
+
+Flask focuses on simplicity and minimal setup, making it a great choice when you want control without a lot of boilerplate.
+
+Install Flask with pip, then create an app by importing Flask and instantiating it. Define routes with the @app.route() decorator so functions respond to specific URLs.
+
+Use Jinja2 templates to render dynamic HTML and share reusable components across pages.

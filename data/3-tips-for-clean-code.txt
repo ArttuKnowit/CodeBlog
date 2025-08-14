@@ -1,0 +1,9 @@
+Tips for Writing Clean Code
+
+Clean code is easy to read, understand, and maintain. It follows conventions and keeps complexity low so others can work with it confidently.
+
+Use meaningful names, keep functions small and focused, and avoid unnecessary abstractions. Prefer clarity over cleverness.
+
+Comments should explain why, not what. Aim for self-explanatory code so comments become the exception, not the rule.
+
+Apply consistent formatting and style across the codebase. Use linters and formatters to automate standards and reduce friction in reviews.
