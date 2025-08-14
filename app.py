@@ -153,7 +153,7 @@ def toggle_favorite(post_id):
     else:
         conn.execute('INSERT INTO favorites (user_id, post_id) VALUES (?, ?)',
                      (current_user.id, post_id))
-        flash('Added to favorites.', 'info')
+        flash('Added to favorites', 'info')
     conn.commit()
     conn.close()
     return redirect(url_for('post', post_id=post_id))
