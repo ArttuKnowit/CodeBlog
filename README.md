@@ -73,12 +73,16 @@ The app will be available at http://127.0.0.1:5000/
 
 Create docker network:
 
-```
+```bash
 docker network create codeblog_network
 ```
 
 Build both containers (tests and the application)
 
+```bash
+docker build -t codeblog .
+docker build -t codeblog_tests -f robot_tests/Dockerfile
+```
 Run both containers in the same network.
 
 ```bash
@@ -86,6 +90,8 @@ docker run -p 5000:5000 --network codeblog_network --name codeblog_app codeblog
 ...
 docker run --network codeblog_network codeblog_tests
 ```
+
+### Run tests with docker compose
 
 ## Project Structure
 
