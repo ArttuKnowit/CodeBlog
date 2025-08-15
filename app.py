@@ -69,6 +69,21 @@ def ensure_optional_tables():
         )
         """
     )
+    # Ensure messages table exists
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            is_read INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (sender_id) REFERENCES users (id),
+            FOREIGN KEY (recipient_id) REFERENCES users (id)
+        )
+        """
+    )
     # Ensure users.intro column exists for older databases
     try:
         has_intro = conn.execute("SELECT 1 FROM pragma_table_info('users') WHERE name='intro'").fetchone()
@@ -122,6 +137,41 @@ def index():
     posts = conn.execute('SELECT * FROM posts ORDER BY created DESC').fetchall()
     conn.close()
     return render_template('index.html', posts=[dict(p) for p in posts], user=current_user if current_user.is_authenticated else None)
+
+
+# -----------------------------
+# Messaging helpers
+# -----------------------------
+
+def get_messages_for_user(user_id, box='inbox', limit=50, offset=0):
+    conn = get_db_connection()
+    if box == 'sent':
+        rows = conn.execute(
+            'SELECT m.*, u.username as other_username FROM messages m '
+            'JOIN users u ON u.id = m.recipient_id '
+            'WHERE m.sender_id = ? ORDER BY m.created DESC LIMIT ? OFFSET ?',
+            (user_id, limit, offset)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            'SELECT m.*, u.username as other_username FROM messages m '
+            'JOIN users u ON u.id = m.sender_id '
+            'WHERE m.recipient_id = ? ORDER BY m.created DESC LIMIT ? OFFSET ?',
+            (user_id, limit, offset)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def create_message(sender_id, recipient_id, content):
+    conn = get_db_connection()
+    cur = conn.execute(
+        'INSERT INTO messages (sender_id, recipient_id, content) VALUES (?, ?, ?)',
+        (sender_id, recipient_id, content)
+    )
+    new_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return new_id
 
 
 @app.route('/<int:post_id>')
@@ -179,6 +229,91 @@ def api_list_posts():
         return jsonify({'error': 'Internal Server Error'}), 500
 
 
+# -----------------------------
+# Messaging API
+# -----------------------------
+
+def _serialize_message_row(row, current_user_id=None):
+    return {
+        'id': row['id'],
+        'sender_id': row['sender_id'],
+        'recipient_id': row['recipient_id'],
+        'content': row['content'],
+        'created': row['created'],
+        'is_read': bool(row['is_read']),
+    }
+
+
+@app.route('/api/messages', methods=['GET'])
+@login_required
+def api_list_messages():
+    box = request.args.get('box', 'inbox').lower()
+    if box not in ('inbox', 'sent'):
+        box = 'inbox'
+    limit = request.args.get('limit', default=50, type=int) or 50
+    offset = request.args.get('offset', default=0, type=int) or 0
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    rows = get_messages_for_user(current_user.id, box=box, limit=limit, offset=offset)
+    return jsonify({'messages': [_serialize_message_row(r) for r in rows], 'box': box, 'limit': limit, 'offset': offset})
+
+
+@app.route('/api/messages', methods=['POST'])
+@login_required
+def api_send_message():
+    payload = request.get_json(silent=True) or {}
+    to_username = payload.get('to')
+    content = payload.get('content')
+    if not to_username or not isinstance(to_username, str):
+        return jsonify({'error': 'Validation failed', 'details': {'to': 'Recipient username is required'}}), 400
+    if content is None or not isinstance(content, str) or not content.strip():
+        return jsonify({'error': 'Validation failed', 'details': {'content': 'Message content is required'}}), 400
+    target = get_user_by_username(to_username)
+    if not target:
+        return jsonify({'error': 'Recipient not found'}), 404
+    if int(target['id']) == int(current_user.id):
+        return jsonify({'error': 'Cannot send a message to yourself'}), 400
+    msg_id = create_message(current_user.id, target['id'], content.strip())
+    return jsonify({'id': msg_id}), 201
+
+
+@app.route('/api/posts', methods=['POST'])
+def api_create_post():
+    # Require logged-in session for API creation
+    if not current_user.is_authenticated:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    payload = request.get_json(silent=True) or {}
+    title = payload.get('title') if isinstance(payload, dict) else None
+    content = payload.get('content') if isinstance(payload, dict) else None
+
+    errors = {}
+    if not title or not isinstance(title, str) or not title.strip():
+        errors['title'] = 'Title is required.'
+    if content is None or not isinstance(content, str):
+        errors['content'] = 'Content must be a string.'
+    if errors:
+        return jsonify({'error': 'Validation failed', 'details': errors}), 400
+
+    conn = get_db_connection()
+    cur = conn.execute(
+        'INSERT INTO posts (title, content, user_id) VALUES (?, ?, ?)',
+        (title.strip(), content, current_user.id)
+    )
+    new_id = cur.lastrowid
+    row = conn.execute(
+        'SELECT p.id, p.title, p.content, p.created, p.user_id, u.username '
+        'FROM posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?',
+        (new_id,)
+    ).fetchone()
+    conn.commit()
+    conn.close()
+    resp = jsonify(_serialize_post_row(row))
+    resp.status_code = 201
+    resp.headers['Location'] = url_for('api_get_post', post_id=new_id)
+    return resp
+
+
 @app.route('/api/posts/<int:post_id>', methods=['GET'])
 def api_get_post(post_id):
     include = request.args.get('include', '')
@@ -223,7 +358,7 @@ def build_openapi_spec():
         "info": {
             "title": "CodeBlog API",
             "version": "1.0.0",
-            "description": "Read-only API to list posts and fetch a single post with optional comments."
+            "description": "API to list posts, fetch a single post (optionally with comments), and create new posts (session auth required)."
         },
         "servers": [
             {"url": "/"}
@@ -265,6 +400,79 @@ def build_openapi_spec():
                         },
                         "500": {"description": "Internal Server Error"}
                     }
+                },
+                "post": {
+                    "summary": "Create a new post",
+                    "description": "Creates a blog post. Requires a logged-in session.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["title", "content"],
+                                    "properties": {
+                                        "title": {"type": "string", "example": "My Post"},
+                                        "content": {"type": "string", "example": "Hello world"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "headers": {
+                                "Location": {"schema": {"type": "string"}, "description": "URL of the new resource"}
+                            },
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Post"}}}
+                        },
+                        "400": {"description": "Validation error"},
+                        "401": {"description": "Authentication required"}
+                    }
+                }
+            },
+            "/api/messages": {
+                "get": {
+                    "summary": "List messages",
+                    "description": "List messages in the authenticated user's inbox or sent box.",
+                    "parameters": [
+                        {"name": "box", "in": "query", "schema": {"type": "string", "enum": ["inbox", "sent"], "default": "inbox"}},
+                        {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50}},
+                        {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}}
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "A list of messages",
+                            "content": {"application/json": {"schema": {"type": "object", "properties": {"messages": {"type": "array", "items": {"$ref": "#/components/schemas/Message"}}, "box": {"type": "string"}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}}}
+                        },
+                        "401": {"description": "Authentication required"}
+                    }
+                },
+                "post": {
+                    "summary": "Send a message",
+                    "description": "Send a private message to another user (by username). Requires session auth.",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "type": "object",
+                                    "required": ["to", "content"],
+                                    "properties": {
+                                        "to": {"type": "string", "example": "alice"},
+                                        "content": {"type": "string", "example": "Hi there!"}
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "201": {"description": "Created", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "integer"}}}}}},
+                        "400": {"description": "Validation error"},
+                        "401": {"description": "Authentication required"},
+                        "404": {"description": "Recipient not found"}
+                    }
                 }
             },
             "/api/posts/{post_id}": {
@@ -300,6 +508,17 @@ def build_openapi_spec():
         },
         "components": {
             "schemas": {
+                "Message": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "sender_id": {"type": "integer"},
+                        "recipient_id": {"type": "integer"},
+                        "content": {"type": "string"},
+                        "created": {"type": "string"},
+                        "is_read": {"type": "boolean"}
+                    }
+                },
                 "Author": {
                     "type": "object",
                     "properties": {
@@ -354,6 +573,51 @@ def openapi_json():
 def api_docs():
     # Renders Swagger UI pointing at our OpenAPI JSON
     return render_template('api_docs.html', spec_url=url_for('openapi_json'))
+
+
+# -----------------------------
+# Messaging web routes
+# -----------------------------
+
+@app.route('/messages')
+@login_required
+def messages():
+    box = request.args.get('box', 'inbox').lower()
+    if box not in ('inbox', 'sent'):
+        box = 'inbox'
+    rows = get_messages_for_user(current_user.id, box=box, limit=100, offset=0)
+    # Mark inbox messages as read upon viewing
+    if box == 'inbox' and rows:
+        conn = get_db_connection()
+        conn.execute('UPDATE messages SET is_read = 1 WHERE recipient_id = ? AND is_read = 0', (current_user.id,))
+        conn.commit()
+        conn.close()
+    return render_template('messages.html', user=current_user, messages=rows, box=box)
+
+
+@app.route('/messages/compose', methods=['GET', 'POST'])
+@login_required
+def compose_message():
+    if request.method == 'POST':
+        to_username = request.form.get('to', '').strip()
+        content = request.form.get('content', '').strip()
+        if not to_username:
+            flash('Recipient username is required.', 'error')
+            return render_template('compose_message.html', user=current_user)
+        if not content:
+            flash('Message content is required.', 'error')
+            return render_template('compose_message.html', user=current_user)
+        target = get_user_by_username(to_username)
+        if not target:
+            flash('Recipient not found.', 'error')
+            return render_template('compose_message.html', user=current_user)
+        if int(target['id']) == int(current_user.id):
+            flash('You cannot send a message to yourself.', 'error')
+            return render_template('compose_message.html', user=current_user)
+        create_message(current_user.id, target['id'], content)
+        flash('Message sent.', 'info')
+        return redirect(url_for('messages', box='sent'))
+    return render_template('compose_message.html', user=current_user)
 
 @app.route('/<int:post_id>/favorite', methods=['POST'])
 @login_required

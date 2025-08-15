@@ -35,3 +35,15 @@ CREATE TABLE favorites (
     FOREIGN KEY (user_id) REFERENCES users (id),
     FOREIGN KEY (post_id) REFERENCES posts (id)
 );
+
+-- Private messages between users
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sender_id INTEGER NOT NULL,
+    recipient_id INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    is_read INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (sender_id) REFERENCES users (id),
+    FOREIGN KEY (recipient_id) REFERENCES users (id)
+);

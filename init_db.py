@@ -83,5 +83,19 @@ comments = [
 for post_id, user_id, content in comments:
     cur.execute("INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)", (post_id, user_id, content))
 
+# Add example private messages between users
+messages = [
+    # sender, recipient, content
+    ('alice', 'bob', 'Hey Bob, loved your comment on decorators!'),
+    ('bob', 'alice', 'Thanks Alice! Want to pair on a Flask app?'),
+    ('charlie', 'alice', 'Great post ideas. Let\'s chat about databases.'),
+]
+user_ids = {u[0]: idx+1 for idx, u in enumerate(users)}
+for sender, recipient, content in messages:
+    cur.execute(
+        "INSERT INTO messages (sender_id, recipient_id, content) VALUES (?, ?, ?)",
+        (user_ids[sender], user_ids[recipient], content)
+    )
+
 connection.commit()
 connection.close()
