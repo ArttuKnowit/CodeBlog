@@ -1,5 +1,5 @@
 import sqlite3
-from flask import Flask, render_template, request, url_for, flash, redirect
+from flask import Flask, render_template, request, url_for, flash, redirect, jsonify
 from werkzeug.exceptions import abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
@@ -138,6 +138,222 @@ def post(post_id):
         is_favorite = fav is not None
     return render_template('post.html', post=post, comments=comments, is_favorite=is_favorite,
                            user=current_user if current_user.is_authenticated else None)
+
+
+# -----------------------------
+# Public JSON API for posts
+# -----------------------------
+
+def _serialize_post_row(row):
+    return {
+        'id': row['id'],
+        'title': row['title'],
+        'content': row['content'],
+        'created': row['created'],
+        'author': {
+            'id': row['user_id'],
+            'username': row['username'] if 'username' in row.keys() else None,
+        }
+    }
+
+
+@app.route('/api/posts', methods=['GET'])
+def api_list_posts():
+    try:
+        limit = request.args.get('limit', default=50, type=int)
+        offset = request.args.get('offset', default=0, type=int)
+        limit = 50 if limit is None else max(1, min(limit, 200))
+        offset = 0 if offset is None else max(0, offset)
+
+        conn = get_db_connection()
+        rows = conn.execute(
+            'SELECT p.id, p.title, p.content, p.created, p.user_id, u.username '
+            'FROM posts p LEFT JOIN users u ON u.id = p.user_id '
+            'ORDER BY p.created DESC LIMIT ? OFFSET ?',
+            (limit, offset)
+        ).fetchall()
+        conn.close()
+        data = [_serialize_post_row(r) for r in rows]
+        return jsonify({'posts': data, 'limit': limit, 'offset': offset})
+    except Exception as e:
+        return jsonify({'error': 'Internal Server Error'}), 500
+
+
+@app.route('/api/posts/<int:post_id>', methods=['GET'])
+def api_get_post(post_id):
+    include = request.args.get('include', '')
+    include_comments = 'comments' in {part.strip().lower() for part in include.split(',') if part}
+    conn = get_db_connection()
+    row = conn.execute(
+        'SELECT p.id, p.title, p.content, p.created, p.user_id, u.username '
+        'FROM posts p LEFT JOIN users u ON u.id = p.user_id WHERE p.id = ?',
+        (post_id,)
+    ).fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Post not found'}), 404
+    post_dict = _serialize_post_row(row)
+    if include_comments:
+        comments = conn.execute(
+            'SELECT c.id, c.post_id, c.user_id, c.content, c.created, u.username '
+            'FROM comments c LEFT JOIN users u ON u.id = c.user_id WHERE c.post_id = ? '
+            'ORDER BY c.created ASC',
+            (post_id,)
+        ).fetchall()
+        post_dict['comments'] = [
+            {
+                'id': c['id'],
+                'content': c['content'],
+                'created': c['created'],
+                'user': {'id': c['user_id'], 'username': c['username']},
+            }
+            for c in comments
+        ]
+    conn.close()
+    return jsonify(post_dict)
+
+
+# -----------------------------
+# OpenAPI (Swagger) documentation
+# -----------------------------
+
+def build_openapi_spec():
+    return {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "CodeBlog API",
+            "version": "1.0.0",
+            "description": "Read-only API to list posts and fetch a single post with optional comments."
+        },
+        "servers": [
+            {"url": "/"}
+        ],
+        "paths": {
+            "/api/posts": {
+                "get": {
+                    "summary": "List posts",
+                    "description": "Returns a paginated list of posts ordered by newest first.",
+                    "parameters": [
+                        {
+                            "name": "limit",
+                            "in": "query",
+                            "schema": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                            "description": "Max items to return (1-200)."
+                        },
+                        {
+                            "name": "offset",
+                            "in": "query",
+                            "schema": {"type": "integer", "minimum": 0, "default": 0},
+                            "description": "Number of items to skip."
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "A list of posts",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "type": "object",
+                                        "properties": {
+                                            "posts": {"type": "array", "items": {"$ref": "#/components/schemas/Post"}},
+                                            "limit": {"type": "integer"},
+                                            "offset": {"type": "integer"}
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        "500": {"description": "Internal Server Error"}
+                    }
+                }
+            },
+            "/api/posts/{post_id}": {
+                "get": {
+                    "summary": "Get a single post",
+                    "parameters": [
+                        {
+                            "name": "post_id",
+                            "in": "path",
+                            "required": True,
+                            "schema": {"type": "integer"}
+                        },
+                        {
+                            "name": "include",
+                            "in": "query",
+                            "schema": {"type": "string", "example": "comments"},
+                            "description": "Optional comma-separated inclusions. Use 'comments' to embed comments."
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "The post",
+                            "content": {
+                                "application/json": {
+                                    "schema": {"$ref": "#/components/schemas/PostWithOptionalComments"}
+                                }
+                            }
+                        },
+                        "404": {"description": "Post not found"}
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "Author": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "nullable": True},
+                        "username": {"type": "string", "nullable": True}
+                    }
+                },
+                "Comment": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "content": {"type": "string"},
+                        "created": {"type": "string"},
+                        "user": {"$ref": "#/components/schemas/Author"}
+                    }
+                },
+                "Post": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer"},
+                        "title": {"type": "string"},
+                        "content": {"type": "string"},
+                        "created": {"type": "string"},
+                        "author": {"$ref": "#/components/schemas/Author"}
+                    }
+                },
+                "PostWithOptionalComments": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/Post"},
+                        {
+                            "type": "object",
+                            "properties": {
+                                "comments": {
+                                    "type": "array",
+                                    "items": {"$ref": "#/components/schemas/Comment"}
+                                }
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+
+@app.route('/api/openapi.json')
+def openapi_json():
+    return jsonify(build_openapi_spec())
+
+
+@app.route('/api/docs')
+def api_docs():
+    # Renders Swagger UI pointing at our OpenAPI JSON
+    return render_template('api_docs.html', spec_url=url_for('openapi_json'))
 
 @app.route('/<int:post_id>/favorite', methods=['POST'])
 @login_required

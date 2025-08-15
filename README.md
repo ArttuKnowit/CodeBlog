@@ -83,6 +83,7 @@ Build both containers (tests and the application)
 docker build -t codeblog .
 docker build -t codeblog_tests -f robot_tests/Dockerfile
 ```
+
 Run both containers in the same network.
 
 ```bash

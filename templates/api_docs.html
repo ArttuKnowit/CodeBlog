@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block title %}API Docs{% endblock %}
+{% block content %}
+  <h2>API Documentation</h2>
+  <div id="swagger-ui"></div>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.2/swagger-ui.css" />
+  <script src="https://unpkg.com/swagger-ui-dist@5.11.2/swagger-ui-bundle.js" crossorigin></script>
+  <script>
+    window.addEventListener('DOMContentLoaded', () => {
+      window.ui = SwaggerUIBundle({
+        url: "{{ spec_url }}",
+        dom_id: '#swagger-ui',
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: 'BaseLayout'
+      });
+    });
+  </script>
+{% endblock %}
